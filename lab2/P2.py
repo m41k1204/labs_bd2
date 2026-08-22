@@ -167,10 +167,6 @@ class SlottedPage:
       f.seek(FILE_HEADER_SIZE + page_id * PAGE_SIZE)
       f.write(page.pack())
 
-  def compact(self):
-    pass
-
-
 if __name__ == "__main__":
   def gen(i):
     obs = "obs " + "x" * (i % 40)
