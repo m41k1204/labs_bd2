@@ -248,13 +248,13 @@ if __name__ == "__main__":
     for rid in borrar:
         fr.remove(rid)
     print(f"\nremove {borrar}")
-    print("Headers DESPUES (total igual, activos baja, free_pointer = ultimo borrado):")
+    print("Headers DESPUES")
     for p in range(2):
         print(f"pagina {p}: {page_header(fn, p)}")
     print(f"load() ahora devuelve {len(fr.load())} registros (sin los borrados)")
     print(f"readRecord((0,2)) = {fr.readRecord((0, 2))}")
 
-    print("\nReinsercion (debe REUSAR los slots liberados):")
+    print("\nReinsercion:")
     for k in range(3):
         nuevo = fr.add(gen(1000 + k))
         print(f"add RID {nuevo}   (slot reciclado)")
