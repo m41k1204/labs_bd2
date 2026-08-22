@@ -10,7 +10,7 @@ RECORD_SIZE = struct.calcsize(FORMAT)
 FILE_HEADER_FORMAT = '<ii'
 FILE_HEADER_SIZE = struct.calcsize(FILE_HEADER_FORMAT)
 
-PAGE_HEADER_FORMAT = '<ii'
+PAGE_HEADER_FORMAT = '<iii'
 PAGE_HEADER_SIZE = struct.calcsize(PAGE_HEADER_FORMAT)
 
 SLOT_SIZE = 1 + RECORD_SIZE
@@ -38,6 +38,7 @@ class Alumno:
 class Page:
     def __init__(self):
         self.num_records = 0
+        self.num_active = 0
         self.head_free_list = -1
         self.records = []
 
@@ -49,7 +50,7 @@ class Page:
 
     def pack(self):
         buf = bytearray(PAGE_SIZE)
-        struct.pack_into(PAGE_HEADER_FORMAT, buf, 0, self.num_records, self.head_free_list)
+        struct.pack_into(PAGE_HEADER_FORMAT, buf, 0, self.num_records, self.num_active, self.head_free_list)
         off = PAGE_HEADER_SIZE
         for slot in self.records:
             if isinstance(slot, Alumno):
@@ -67,7 +68,7 @@ class Page:
     @staticmethod
     def unpack(data):
         page = Page()
-        page.num_records, page.head_free_list = struct.unpack_from(PAGE_HEADER_FORMAT, data, 0)
+        page.num_records, page.num_active, page.head_free_list = struct.unpack_from(PAGE_HEADER_FORMAT, data, 0)
         off = PAGE_HEADER_SIZE
         for _ in range(page.num_records):
             flag = data[off]
@@ -115,6 +116,7 @@ class FixedRecord:
                         slot_id = page.head_free_list
                         page.head_free_list = page.records[slot_id]
                         page.records[slot_id] = record
+                        page.num_active += 1
                         f.seek(FILE_HEADER_SIZE + page_id * PAGE_SIZE)
                         f.write(page.pack())
                         return (page_id, slot_id)
@@ -126,6 +128,7 @@ class FixedRecord:
                     slot_id = page.num_records
                     page.records.append(record)
                     page.num_records += 1
+                    page.num_active += 1
                     f.seek(FILE_HEADER_SIZE + page_id * PAGE_SIZE)
                     f.write(page.pack())
                     return (page_id, slot_id)
@@ -133,6 +136,7 @@ class FixedRecord:
             page = Page()
             page.records.append(record)
             page.num_records = 1
+            page.num_active = 1
             page_id = num_pages
             f.seek(FILE_HEADER_SIZE + page_id * PAGE_SIZE)
             f.write(page.pack())
@@ -173,6 +177,7 @@ class FixedRecord:
                 return
             page.records[slot_id] = page.head_free_list
             page.head_free_list = slot_id
+            page.num_active -= 1
             f.seek(FILE_HEADER_SIZE + page_id * PAGE_SIZE)
             f.write(page.pack())
 
@@ -191,6 +196,7 @@ class FixedRecord:
                 page.records[slot_id] = page.records[last]
             page.records.pop()
             page.num_records -= 1
+            page.num_active -= 1
             f.seek(FILE_HEADER_SIZE + page_id * PAGE_SIZE)
             f.write(page.pack())
 
@@ -209,7 +215,7 @@ if __name__ == "__main__":
         with open(fn, "rb") as f:
             f.seek(FILE_HEADER_SIZE + p * PAGE_SIZE)
             page = Page.unpack(f.read(PAGE_SIZE))
-        return page.num_records, page.head_free_list
+        return page.num_records, page.num_active, page.head_free_list
 
     N = 120
 
@@ -228,12 +234,12 @@ if __name__ == "__main__":
     print("RID reg", N - 1, ":", rids[-1])
     print("load():", len(fr.load()), "registros")
     print("readRecord", rids[8], ":", fr.readRecord(rids[8]))
-    print("Pagina 0 antes (num_records, head_free_list):", page_meta(fn, 0))
+    print("Pagina 0 antes (num_records, num_active, head_free_list):", page_meta(fn, 0))
     borrar = [(0, 2), (0, 5)]
     for rid in borrar:
         fr.remove(rid)
     print("remove:", borrar)
-    print("Pagina 0 despues (num_records, head_free_list):", page_meta(fn, 0))
+    print("Pagina 0 despues (num_records, num_active, head_free_list):", page_meta(fn, 0))
     print("load():", len(fr.load()), "registros")
     print("readRecord (0,2):", fr.readRecord((0, 2)))
     print("Reinsercion:")
@@ -251,10 +257,10 @@ if __name__ == "__main__":
         rids2.append(ml.add(gen(i)))
     print("Registros insertados:", N)
     print("Numero de paginas:", num_pages(fn2))
-    print("Pagina 0 antes (num_records, head_free_list):", page_meta(fn2, 0))
+    print("Pagina 0 antes (num_records, num_active, head_free_list):", page_meta(fn2, 0))
     print("(0,3) antes:", ml.readRecord((0, 3)).codigo)
     ml.remove((0, 3))
     print("remove: (0, 3)")
-    print("Pagina 0 despues (num_records, head_free_list):", page_meta(fn2, 0))
+    print("Pagina 0 despues (num_records, num_active, head_free_list):", page_meta(fn2, 0))
     print("(0,3) despues:", ml.readRecord((0, 3)).codigo)
     print("load():", len(ml.load()), "registros")
