@@ -6,31 +6,6 @@ PAGE_SIZE = 512
 FILE_HEADER_FORMAT = '<ii'
 FILE_HEADER_SIZE = struct.calcsize(FILE_HEADER_FORMAT)
 
-class PageHeader:
-  def __init__(self, num_slots=0, free_ptr=PAGE_SIZE, directorio=None):
-    if directorio is None:
-      directorio = []
-    self.num_slots = num_slots
-    self.free_ptr = free_ptr
-    self.directorio = directorio
-
-  def pack(self):
-    data = struct.pack('<HH', self.num_slots, self.free_ptr)
-    for offset, length in self.directorio:
-      data += struct.pack('<hh', offset, length)
-    return data
-
-  @staticmethod
-  def unpack(data):
-    num_slots, free_ptr = struct.unpack_from('<HH', data, 0)
-    directorio = []
-    p = 4
-    for _ in range(num_slots):
-      offset, length = struct.unpack_from('<hh', data, p)
-      directorio.append((offset, length))
-      p += 4
-    return PageHeader(num_slots, free_ptr, directorio)
-
 
 class Matricula:
   def __init__(self, codigo, ciclo, mensualidad, observaciones):
@@ -66,6 +41,64 @@ class Matricula:
             f"{self.mensualidad}, {self.observaciones!r})")
 
 
+class Page:
+  def __init__(self):
+    self.num_slots = 0
+    self.free_ptr = PAGE_SIZE
+    self.directorio = []
+    self.data = bytearray(PAGE_SIZE)
+
+  def free_space(self):
+    return self.free_ptr - (4 + self.num_slots * 4)
+
+  def cabe(self, size):
+    return self.free_space() >= size + 4
+
+  def insert(self, record_bytes):
+    size = len(record_bytes)
+    offset = self.free_ptr - size
+    self.data[offset:offset + size] = record_bytes
+    slot_id = self.num_slots
+    self.directorio.append((offset, size))
+    self.num_slots += 1
+    self.free_ptr = offset
+    return slot_id
+
+  def read(self, slot_id):
+    if slot_id >= self.num_slots:
+      return None
+    offset, length = self.directorio[slot_id]
+    if length == -1:
+      return None
+    return self.data[offset:offset + length]
+
+  def delete(self, slot_id):
+    if slot_id >= self.num_slots or self.directorio[slot_id][1] == -1:
+      return
+    self.directorio[slot_id] = (-1, -1)
+
+  def pack(self):
+    buf = bytearray(self.data)
+    struct.pack_into('<HH', buf, 0, self.num_slots, self.free_ptr)
+    off = 4
+    for offset, length in self.directorio:
+      struct.pack_into('<hh', buf, off, offset, length)
+      off += 4
+    return bytes(buf)
+
+  @staticmethod
+  def unpack(data):
+    page = Page()
+    page.data = bytearray(data)
+    page.num_slots, page.free_ptr = struct.unpack_from('<HH', data, 0)
+    off = 4
+    for _ in range(page.num_slots):
+      offset, length = struct.unpack_from('<hh', data, off)
+      page.directorio.append((offset, length))
+      off += 4
+    return page
+
+
 class SlottedPage:
   def __init__(self, filename):
     self.filename = filename
@@ -79,13 +112,11 @@ class SlottedPage:
       page_size, num_pages = struct.unpack(FILE_HEADER_FORMAT, f.read(FILE_HEADER_SIZE))
       for page_id in range(num_pages):
         f.seek(FILE_HEADER_SIZE + page_id * PAGE_SIZE)
-        page = f.read(PAGE_SIZE)
-        header = PageHeader.unpack(page)
-        for offset, length in header.directorio:
-          if length == -1:
-            continue
-          record = Matricula.unpack(page[offset:offset + length])
-          resultado.append(record)
+        page = Page.unpack(f.read(PAGE_SIZE))
+        for slot_id in range(page.num_slots):
+          record_bytes = page.read(slot_id)
+          if record_bytes is not None:
+            resultado.append(Matricula.unpack(record_bytes))
     return resultado
 
   def add(self, record):
@@ -93,40 +124,23 @@ class SlottedPage:
     size = len(data)
     with open(self.filename, "r+b") as f:
       page_size, num_pages = struct.unpack(FILE_HEADER_FORMAT, f.read(FILE_HEADER_SIZE))
+      for page_id in range(num_pages):
+        f.seek(FILE_HEADER_SIZE + page_id * PAGE_SIZE)
+        page = Page.unpack(f.read(PAGE_SIZE))
+        if page.cabe(size):
+          slot_id = page.insert(data)
+          f.seek(FILE_HEADER_SIZE + page_id * PAGE_SIZE)
+          f.write(page.pack())
+          return (page_id, slot_id)
 
-      page_id = -1
-      page = None
-      header = None
-      for p in range(num_pages):
-        f.seek(FILE_HEADER_SIZE + p * PAGE_SIZE)
-        page = bytearray(f.read(PAGE_SIZE))
-        header = PageHeader.unpack(page)
-        free_space = header.free_ptr - (4 + header.num_slots * 4)
-        if free_space >= size + 4:
-          page_id = p
-          break
-
-      if page_id == -1:
-        page_id = num_pages
-        page = bytearray(PAGE_SIZE)
-        header = PageHeader()
-        num_pages += 1
-        f.seek(0)
-        f.write(struct.pack(FILE_HEADER_FORMAT, page_size, num_pages))
-
-      slot_id = header.num_slots
-      offset = header.free_ptr - size
-      page[offset:offset + size] = data
-      header.directorio.append((offset, size))
-      header.num_slots += 1
-      header.free_ptr = offset
-
-      hb = header.pack()
-      page[0:len(hb)] = hb
+      page = Page()
+      slot_id = page.insert(data)
+      page_id = num_pages
       f.seek(FILE_HEADER_SIZE + page_id * PAGE_SIZE)
-      f.write(page)
-
-    return (page_id, slot_id)
+      f.write(page.pack())
+      f.seek(0)
+      f.write(struct.pack(FILE_HEADER_FORMAT, PAGE_SIZE, num_pages + 1))
+      return (page_id, slot_id)
 
   def readRecord(self, rid):
     page_id, slot_id = rid
@@ -135,14 +149,11 @@ class SlottedPage:
       if page_id >= num_pages:
         return None
       f.seek(FILE_HEADER_SIZE + page_id * PAGE_SIZE)
-      page = f.read(PAGE_SIZE)
-    header = PageHeader.unpack(page)
-    if slot_id >= header.num_slots:
+      page = Page.unpack(f.read(PAGE_SIZE))
+    record_bytes = page.read(slot_id)
+    if record_bytes is None:
       return None
-    offset, length = header.directorio[slot_id]
-    if length == -1:
-      return None
-    return Matricula.unpack(page[offset:offset + length])
+    return Matricula.unpack(record_bytes)
 
   def remove(self, rid):
     page_id, slot_id = rid
@@ -151,15 +162,13 @@ class SlottedPage:
       if page_id >= num_pages:
         return
       f.seek(FILE_HEADER_SIZE + page_id * PAGE_SIZE)
-      page = bytearray(f.read(PAGE_SIZE))
-      header = PageHeader.unpack(page)
-      if slot_id >= header.num_slots or header.directorio[slot_id][1] == -1:
-        return
-      header.directorio[slot_id] = (-1, -1)
-      hb = header.pack()
-      page[0:len(hb)] = hb
+      page = Page.unpack(f.read(PAGE_SIZE))
+      page.delete(slot_id)
       f.seek(FILE_HEADER_SIZE + page_id * PAGE_SIZE)
-      f.write(page)
+      f.write(page.pack())
+
+  def compact(self):
+    pass
 
 
 if __name__ == "__main__":
@@ -167,16 +176,15 @@ if __name__ == "__main__":
     obs = "obs " + "x" * (i % 40)
     return Matricula(f"M-{i:04}", (i % 10) + 1, 1000.0 + i, obs)
 
-  def file_header(fn):
+  def num_pages(fn):
     with open(fn, "rb") as f:
-      return struct.unpack(FILE_HEADER_FORMAT, f.read(FILE_HEADER_SIZE))
+      return struct.unpack(FILE_HEADER_FORMAT, f.read(FILE_HEADER_SIZE))[1]
 
-  def page_header(fn, p):
+  def page_meta(fn, p):
     with open(fn, "rb") as f:
       f.seek(FILE_HEADER_SIZE + p * PAGE_SIZE)
-      page = f.read(PAGE_SIZE)
-    h = PageHeader.unpack(page)
-    return h.num_slots, h.free_ptr, h.directorio
+      page = Page.unpack(f.read(PAGE_SIZE))
+    return page.num_slots, page.free_ptr, page.directorio
 
   N = 120
   fn = "matriculas.dat"
@@ -188,9 +196,8 @@ if __name__ == "__main__":
   for i in range(N):
     rids.append(sp.add(gen(i)))
 
-  ps, npg = file_header(fn)
   print("Registros insertados:", N)
-  print("Numero de paginas:", npg)
+  print("Numero de paginas:", num_pages(fn))
   print("RID reg 0:", rids[0])
   print("RID reg", N - 1, ":", rids[-1])
   print("load():", len(sp.load()), "registros")
@@ -202,7 +209,7 @@ if __name__ == "__main__":
   print("readRecord", rids[0], ":", sp.readRecord(rids[0]))
   print("readRecord", rids[50], ":", sp.readRecord(rids[50]))
 
-  ns, fp, direc = page_header(fn, 0)
+  ns, fp, direc = page_meta(fn, 0)
   print("Pagina 0 antes -> num_slots:", ns, "free_ptr:", fp)
   print("Directorio pagina 0 antes:", direc)
 
@@ -211,11 +218,8 @@ if __name__ == "__main__":
     sp.remove(rid)
   print("remove:", borrar)
 
-  ns, fp, direc = page_header(fn, 0)
+  ns, fp, direc = page_meta(fn, 0)
   print("Pagina 0 despues -> num_slots:", ns, "free_ptr:", fp)
   print("Directorio pagina 0 despues:", direc)
   print("readRecord", rids[1], "tras borrar:", sp.readRecord(rids[1]))
   print("load():", len(sp.load()), "registros")
-
-
-
